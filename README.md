@@ -9,7 +9,7 @@ Overlight is a Windows application that reduces screen brightness by applying a 
 ## 💡 Usage
 
 - Launch the application
-- Adjust the overlay darkness level using Hotkeys(Ctrl+Alt+Up (Increase), Ctrl+Alt+Down (Decrease), Ctrl+Alt+Esc (Exit))
+- Adjust the overlay darkness level using Hotkeys (Ctrl+Alt+Up (Increase), Ctrl+Alt+Down (Decrease), Ctrl+Alt+Esc (Exit))
 
 The app runs in the system tray and remains active in the background until closed.
 
