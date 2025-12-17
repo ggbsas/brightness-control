@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import ctypes
+import psutil
 import base64
 import iconbase
 import threading
@@ -15,58 +16,14 @@ from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QWidg
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
-kernel32 = ctypes.windll.kernel32
 shcore = ctypes.windll.shcore if hasattr(ctypes.windll, "shcore") else None
-WS_EX_LAYERED = 0x00080000
-WS_EX_TRANSPARENT = 0x00000020
-WS_EX_TOPMOST = 0x00000008
-WS_EX_TOOLWINDOW = 0x00000080
-WS_POPUP = 0x80000000
-LWA_ALPHA = 0x00000002
-SW_SHOW = 5
 WM_HOTKEY = 0x0312
-WM_DESTROY = 0x0002
-WM_CLOSE = 0x0010
 VK_UP = 0x26
 VK_DOWN = 0x28
 VK_ESCAPE = 0x1B
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
-SM_XVIRTUALSCREEN = 76
-SM_YVIRTUALSCREEN = 77
-SM_CXVIRTUALSCREEN = 78
-SM_CYVIRTUALSCREEN = 79
-PTR_SIZE = ctypes.sizeof(ctypes.c_void_p)
-LRESULT = ctypes.c_longlong if PTR_SIZE == 8 else ctypes.c_long
-WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 ICON_BASE64_DATA = iconbase.icon_base
-
-class MY_WNDCLASS(ctypes.Structure):
-    _fields_ = [
-        ("style", wintypes.UINT),
-        ("lpfnWndProc", WNDPROC),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", ctypes.c_void_p),
-        ("hCursor", ctypes.c_void_p),
-        ("hbrBackground", ctypes.c_void_p),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-    ]
-
-user32.DefWindowProcW.restype = LRESULT
-user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-user32.RegisterClassW.argtypes = [ctypes.POINTER(MY_WNDCLASS)]
-user32.CreateWindowExW.restype = wintypes.HWND
-user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD]
-user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
-user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
-user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
-user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
-_wndproc_ref = None
-_hbrush = None
-_hwnd = None
 _current_opacity = 50
 _step_percent = 5
 _tray_icon = None
@@ -84,7 +41,7 @@ def load_config():
         with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
             opacity = int(config.get('opacity_percent', DEFAULT_OPACITY))
-            opacity = max(0, min(100, opacity))
+            opacity = max(0, min(50, opacity))
             return opacity
     except (FileNotFoundError, json.JSONDecodeError):
         return DEFAULT_OPACITY
@@ -115,98 +72,95 @@ def set_dpi_awareness():
         except Exception:
             pass
 
+def set_low_priority():
+    try:
+        p = psutil.Process(os.getpid())
+        p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+    except:
+        pass
+
 def update_opacity(change):
-    global _current_opacity, _hwnd, _tray_icon, _slider
+    global _current_opacity, _tray_icon, _slider
 
-    if not _hwnd:
-        return
-
-    _current_opacity = max(0, min(100, _current_opacity + change))
-    alpha = int(255 * (_current_opacity / 100.0))
-    user32.SetLayeredWindowAttributes(_hwnd, 0, alpha, LWA_ALPHA)
-
+    _current_opacity = max(0, min(50, _current_opacity + change))
+    set_gamma_brightness(_current_opacity)
     brightness_percent = 100 - _current_opacity
     msg = f"Overlight: {brightness_percent}%"
-    print(f"\r{msg}  ", end="", flush=True)
 
     if _tray_icon:
         _tray_icon.setToolTip(msg)
     if _slider and _slider_widget and _slider_widget.isVisible():
         _slider.setValue(brightness_percent)
 
+def set_gamma_brightness(opacity_percent):
+    level = max(0.5, (100 - opacity_percent) / 100.0)
+    hdc = user32.GetDC(None)
+    ramp = (wintypes.WORD * 768)()
+    for i in range(256):
+        val = int(i * level * 257)
+        if val > 65535:
+            val = 65535
+
+        ramp[i] = ramp[i+256] = ramp[i+512] = val
+    gdi32.SetDeviceGammaRamp(hdc, ctypes.byref(ramp))
+    user32.ReleaseDC(None, hdc)
+
+def reset_gamma_ramp():
+    try:
+        hdc = user32.GetDC(None)
+        ramp = (wintypes.WORD * 768)()
+        for i in range(256):
+            val = int(i * 257)
+            if val > 65535:
+                val = 65535
+
+            ramp[i] = ramp[i + 256] = ramp[i + 512] = val
+        gdi32.SetDeviceGammaRamp(hdc, ctypes.byref(ramp))
+        user32.ReleaseDC(None, hdc)
+    except:
+        pass
+
 def make_overlay(initial_percent, step_percent):
-    global _wndproc_ref, _hbrush, _hwnd, _current_opacity, _step_percent
+    global _current_opacity, _step_percent
 
     _current_opacity = initial_percent
     _step_percent = step_percent
-    set_dpi_awareness()
-    hInstance = kernel32.GetModuleHandleW(None)
-    class_name = "PyDimOverlay_V3"
-
-    @WNDPROC
-    def wnd_proc(hWnd, msg, wParam, lParam):
-        if msg == WM_DESTROY:
-            user32.PostQuitMessage(0)
-            return 0
-        return user32.DefWindowProcW(hWnd, msg, wParam, lParam)
-
-    _wndproc_ref = wnd_proc
-    _hbrush = gdi32.CreateSolidBrush(0x000000)
-    wndclass = MY_WNDCLASS()
-    wndclass.style = 0
-    wndclass.lpfnWndProc = _wndproc_ref
-    wndclass.hInstance = hInstance
-    wndclass.hbrBackground = _hbrush
-    wndclass.lpszClassName = class_name
-    user32.RegisterClassW(ctypes.byref(wndclass))
-    x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-    y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-    w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-    h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-    exstyle = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
-    _hwnd = user32.CreateWindowExW(
-        exstyle, class_name, None, WS_POPUP,
-        x, y, w, h, None, None, hInstance, None
-    )
-
-    if not _hwnd:
-        raise ctypes.WinError(ctypes.get_last_error())
-
     modifiers = MOD_CONTROL | MOD_ALT
     user32.RegisterHotKey(None, 1, modifiers, VK_UP)
     user32.RegisterHotKey(None, 2, modifiers, VK_DOWN)
     user32.RegisterHotKey(None, 3, modifiers, VK_ESCAPE)
     update_opacity(0)
-    user32.ShowWindow(_hwnd, SW_SHOW)
-    user32.UpdateWindow(_hwnd)
+    set_gamma_brightness(_current_opacity)
     msg = wintypes.MSG()
+    last_check_time = time.time()
 
     try:
-        while _running and user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-            if msg.message == WM_HOTKEY:
-                kid = int(msg.wParam)
-                if kid == 1:
-                    update_opacity(-_step_percent)
-                elif kid == 2:
-                    update_opacity(_step_percent)
-                elif kid == 3:
-                    break
+        while _running:
+            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                if msg.message == WM_HOTKEY:
+                    kid = int(msg.wParam)
+                    if kid == 1:
+                        update_opacity(-_step_percent)
+                    elif kid == 2:
+                        update_opacity(_step_percent)
+                    elif kid == 3:
+                        break
 
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            current_time = time.time()
+            if current_time - last_check_time > 2.0:
+                set_gamma_brightness(_current_opacity)
+                last_check_time = current_time
+
+            time.sleep(0.1)
 
     finally:
         save_config()
         user32.UnregisterHotKey(None, 1)
         user32.UnregisterHotKey(None, 2)
         user32.UnregisterHotKey(None, 3)
-
-        if _hwnd: user32.DestroyWindow(_hwnd)
-        if _hbrush: gdi32.DeleteObject(_hbrush)
-        try:
-            user32.UnregisterClassW(class_name, hInstance)
-        except:
-            pass
+        reset_gamma_ramp()
 
 def show_slider():
     global _slider_widget, _current_opacity, _slider
@@ -301,7 +255,7 @@ def run_tray_icon():
     layout = QVBoxLayout()
     layout.setContentsMargins(5, 0, 5, 0)
     _slider = QSlider(Qt.Horizontal)
-    _slider.setRange(0, 100)
+    _slider.setRange(50, 100)
     _slider.setValue(100 - _current_opacity)
     _slider.valueChanged.connect(update_from_slider)
     layout.addWidget(_slider)
@@ -353,11 +307,11 @@ def run_tray_icon():
     menu.addSeparator()
 
     def exit_app():
-        global _running, _hwnd
+        global _running
         _running = False
         hide_slider()
-        if _hwnd:
-            user32.PostMessageW(_hwnd, WM_CLOSE, 0, 0)
+        reset_gamma_ramp()
+        time.sleep(0.5)
         app.quit()
 
     exit_action = QAction("Exit", menu)
@@ -370,8 +324,10 @@ def run_tray_icon():
     app.exec_()
 
 if __name__ == "__main__":
+    set_dpi_awareness()
+    set_low_priority()
     initial_opacity = load_config()
-    step = 10
+    step = 5
     overlay_thread = threading.Thread(target=make_overlay, args=(initial_opacity, step))
     overlay_thread.daemon = True
 
