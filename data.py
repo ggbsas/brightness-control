@@ -1,30 +1,30 @@
 import os
 import json
 
-CONFIG_DIR = "data"
-CONFIG_FILE = "config.json"
-DEFAULT_OPACITY = 50
-CONFIG_PATH = os.path.join(CONFIG_DIR, CONFIG_FILE)
+config_dir = "data"
+config_file = "config.json"
+default_opacity = 50
+config_path = os.path.join(config_dir, config_file)
 
 def load_config():
     try:
-        with open(CONFIG_PATH, 'r') as f:
+        with open(config_path, 'r') as f:
             config = json.load(f)
-            opacity = int(config.get('opacity_percent', DEFAULT_OPACITY))
+            opacity = int(config.get('opacity_percent', default_opacity))
             opacity = max(0, min(50, opacity))
             return opacity
     except:
-        return DEFAULT_OPACITY
+        return default_opacity
 
 def save_config(_current_opacity):
     config = {'opacity_percent': _current_opacity}
 
     try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
+        os.makedirs(config_dir, exist_ok=True)
     except:
         return
     try:
-        with open(CONFIG_PATH, 'w') as f:
+        with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
     except:
         pass
